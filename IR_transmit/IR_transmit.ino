@@ -4,9 +4,12 @@
 #define CAL_DN_PIN 10
 #define CALIBRATE_TOGGLE_PIN 8
 #define IR_LED_TX_PIN 3
+#define tPwlMicros 900
+#define tPwhMicros 600
 // use built-in LED for cal active for now
 
 #define TOP F_CPU / (8 * 38000)
+#define HALF_DUTY_COUNT int(TOP / 2);
 
 /*
 Packet Structure:
@@ -66,14 +69,14 @@ void setup() {
 }
 
 void sendOne() {
-  OCR2B = int(0.5 * TOP);
-  delayMicroseconds(600);
+  OCR2B = HALF_DUTY_COUNT;
+  delayMicroseconds(tPwhMicros);
   OCR2B = 0;
 }
 
 void sendZero() {
   OCR2B = 0;
-  delayMicroseconds(900);
+  delayMicroseconds(tPwlMicros);
 }
 
 void sendByteRaw(byte sendVal) {

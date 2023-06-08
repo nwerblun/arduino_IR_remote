@@ -2,15 +2,11 @@
 #define TEST_SEND_BUTTON_PIN 2
 #define CAL_UP_PIN 9
 #define CAL_DN_PIN 10
-#define CALIBRATE_TOGGLE_PIN 11
-#define IR_LED_TX_PIN 5
+#define CALIBRATE_TOGGLE_PIN 8
+#define IR_LED_TX_PIN 3
 // use built-in LED for cal active for now
 
-// Carrier freq = 38kHz (IR standard)
-// IR standard is On-Off shift keyed. Receiver module VS1838 expects 600us/900us length pulses for 1/0 respectively
-#define CARRIER_HALF_PERIOD_US 13
-#define ONE_LENGTH_PERIODS 23  // 600us / (1/38k) = 22.8 periods per 1 one pulse
-#define ZERO_LENGTH_PERIODS 34  // 900us / (1/38k) = 34.2 periods per 1 zero pulse
+#define TOP F_CPU / (8 * 38000)
 
 /*
 Packet Structure:
@@ -47,16 +43,36 @@ void setup() {
   pinMode(CALIBRATE_TOGGLE_PIN, INPUT_PULLUP);
 
   Serial.begin(9600);
+
+  // Set pin 3 to 38kHz PWM 50% duty cycle
+  // Timer 2 = pins 11/3
+  // Timer 0 is used for the delay function, don't touch
+  // Zero out default settings, keep only reserved/required bits
+  TCCR2B &= 0b11110000;
+  TCCR2A &= 0b10100000;
+
+  // Set prescalar to 8
+  TCCR2B |= (1 << CS21);
+  // Set PWM mode to fast + use OCR2A as top. Note that this effectively disables pin 11. Also the datasheet says OCRA which is a typo.
+  TCCR2A |= (1 << WGM20) | (1 << WGM21);
+  TCCR2B |= (1 << WGM22);
+  // Set top to be the proper value to get the freq we want
+  OCR2A = TOP;
+
+  // Set behavior of output to go high/low appropriately
+  TCCR2A |= (1 << COM2B1);
+  // Set duty cycle
+  OCR2B = 0;
 }
 
 void sendOne() {
-  tone(IR_LED_TX_PIN, 38000);
+  OCR2B = int(0.5 * TOP);
   delayMicroseconds(600);
-  noTone(IR_LED_TX_PIN);
+  OCR2B = 0;
 }
 
 void sendZero() {
-  noTone(IR_LED_TX_PIN);
+  OCR2B = 0;
   delayMicroseconds(900);
 }
 
@@ -93,26 +109,20 @@ Packet getDefaultPacket() {
 void sendPacket(Packet toBeSent) {
   Serial.println("Sending packet");
   sendIntRaw(toBeSent.start_flag_locking);
-  sendIntRaw(toBeSent.start_flag_locking);
-  sendIntRaw(toBeSent.start_flag_locking);
-  sendIntRaw(toBeSent.start_flag_locking);
-  sendIntRaw(toBeSent.start_flag_locking);
-  sendIntRaw(toBeSent.start_flag_locking);
-
-  // sendIntRaw(toBeSent.start_flag_remainder);
+  sendIntRaw(toBeSent.start_flag_remainder);
   
-  // if (toBeSent.calibrating) {
-  //   sendOne();
-  // } else{
-  //   sendZero();
-  // }
+  if (toBeSent.calibrating) {
+    sendOne();
+  } else{
+    sendZero();
+  }
 
-  // sendByteRaw(toBeSent.channel);
+  sendByteRaw(toBeSent.channel);
   
-  // sendByteRaw(toBeSent.up_dn);
+  sendByteRaw(toBeSent.up_dn);
 
-  // sendIntRaw(toBeSent.end_flag_half);
-  // sendIntRaw(toBeSent.end_flag_half);
+  sendIntRaw(toBeSent.end_flag_half);
+  sendIntRaw(toBeSent.end_flag_half);
 
   Serial.println("Packet sent");
 }

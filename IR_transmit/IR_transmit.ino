@@ -50,19 +50,12 @@ void setup() {
 }
 
 void sendOne() {
-  // for (int i = 0; i < ONE_LENGTH_PERIODS; i++) {
-  //   digitalWrite(IR_LED_TX_PIN, HIGH);
-  //   delayMicroseconds(CARRIER_HALF_PERIOD_US);
-  //   digitalWrite(IR_LED_TX_PIN, LOW);
-  //   delayMicroseconds(CARRIER_HALF_PERIOD_US);
-  // }
   tone(IR_LED_TX_PIN, 38000);
   delayMicroseconds(600);
   noTone(IR_LED_TX_PIN);
 }
 
 void sendZero() {
-  // digitalWrite(IR_LED_TX_PIN, LOW);
   noTone(IR_LED_TX_PIN);
   delayMicroseconds(900);
 }
@@ -72,10 +65,8 @@ void sendByteRaw(byte sendVal) {
   for (int i = 0; i < 8; i++) {
     data = bitRead(sendVal, i);
     if (data == 1) {
-      //Serial.print("1");
       sendOne();
     } else {
-      //Serial.print("0");
       sendZero();
     }
   }
@@ -87,10 +78,8 @@ void sendIntRaw(int sendVal) {
   for (int i = 0; i < num_bits; i++) {
     data = bitRead(sendVal, i);
     if (data == 1) {
-      //Serial.print("1");
       sendOne();
     } else {
-      //Serial.print("0");
       sendZero();
     }
   }
@@ -103,31 +92,27 @@ Packet getDefaultPacket() {
 
 void sendPacket(Packet toBeSent) {
   Serial.println("Sending packet");
-  //Serial.print("Sending: ");
   sendIntRaw(toBeSent.start_flag_locking);
-  sendIntRaw(toBeSent.start_flag_remainder);
-  //Serial.println();
-  
-  if (toBeSent.calibrating) {
-    //Serial.print("Sending: 1\n");
-    sendOne();
-  } else{
-    //Serial.print("Sending: 0\n");
-    sendZero();
-  }
+  sendIntRaw(toBeSent.start_flag_locking);
+  sendIntRaw(toBeSent.start_flag_locking);
+  sendIntRaw(toBeSent.start_flag_locking);
+  sendIntRaw(toBeSent.start_flag_locking);
+  sendIntRaw(toBeSent.start_flag_locking);
 
-  //Serial.print("Sending: ");
-  sendByteRaw(toBeSent.channel);
-  //Serial.println();
+  // sendIntRaw(toBeSent.start_flag_remainder);
   
-  //Serial.print("Sending: ");
-  sendByteRaw(toBeSent.up_dn);
-  //Serial.println();
+  // if (toBeSent.calibrating) {
+  //   sendOne();
+  // } else{
+  //   sendZero();
+  // }
 
-  //Serial.print("Sending: ");
-  sendIntRaw(toBeSent.end_flag_half);
-  sendIntRaw(toBeSent.end_flag_half);
-  //Serial.println();
+  // sendByteRaw(toBeSent.channel);
+  
+  // sendByteRaw(toBeSent.up_dn);
+
+  // sendIntRaw(toBeSent.end_flag_half);
+  // sendIntRaw(toBeSent.end_flag_half);
 
   Serial.println("Packet sent");
 }

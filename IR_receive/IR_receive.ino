@@ -6,15 +6,15 @@
 #define IR_REC_RD_PIN 19
 #define tPwlMicros 900
 #define tPwhMicros 600
-#define SAMPLE_WAIT_TIME_MICROS 350
+#define SAMPLE_WAIT_TIME_MICROS 300
 #define TOP F_CPU / (2 * 256 * 50)
 #define NUM_CHANNELS 2
 // use built-in LED for cal
 
 /*
 Packet Structure:
-|--------START FLAG---------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
-| (010101010101)x2+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
+|------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
+| (01010101)x8+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
 calibrate = 1 if calibrating, 0 if actuating
 cal up/dn = 0/3 if neither, 1 if dn, 2 if up
 channel = 0-9, specifies which motor to use. Numbers >9 reserved
@@ -133,25 +133,32 @@ void parsePacket(bool calibrating, byte channel, byte up_dn) {
 
 byte bitArrToByte(int x[]) {
   const int arrLen = sizeof(x) / sizeof(x[0]);
-  if (arrLen != 4) {
+  if (arrLen != 8) {
     return 0;
   }
 
   byte res = 0;
-  bitWrite(res, 0, x[3]);
-  bitWrite(res, 1, x[2]);
-  bitWrite(res, 2, x[1]);
-  bitWrite(res, 3, x[0]);
+  bitWrite(res, 0, x[7]);
+  bitWrite(res, 1, x[6]);
+  bitWrite(res, 2, x[5]);
+  bitWrite(res, 3, x[4]);
+  bitWrite(res, 4, x[3]);
+  bitWrite(res, 5, x[2]);
+  bitWrite(res, 6, x[1]);
+  bitWrite(res, 7, x[0]);
   return res;
 }
 
 bool allOnes(CircularBuffer<int, 8>* x) {
-  int len = x->size();
-  for (int i = 0; i < len; i++) {
+  Serial.print("Circular start buffer has: ");
+  for (int i = 0; i < 8; i++) {
+    Serial.print((*x)[i]);
     if (!(*x)[i]) {
+      Serial.println();
       return false;
     }
   }
+  Serial.println();
   return true;
 }
 
@@ -176,139 +183,176 @@ bool endFlagInBuffer(CircularBuffer<int, 16>* x) {
   return true;
 }
 
-int start_flag_first = 0b1010101010101010;
-int start_flag_remainder = 0b1111111110101010;
-int end_flag_half = 0b1111100000111111;
-int rec_pin_rd;
 CircularBuffer<int, 8> startBuff;
 CircularBuffer<int, 16> endBuff;
 String state = "wait";
-int channSamp[4] = {0, 0, 0, 0};
-int updnSamp[4] = {0, 0, 0, 0};
+int channSamp[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+int updnSamp[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 bool calibrate = false;
-int counter = 0;
 int timesEndFlagSeen = 0;
 int sample0, sample1, sample2;  // VS1838B is active low, 0 = high
+unsigned long lastTime = millis();
 void loop() {
   if (state == "wait") {
+    lastTime = millis();
     sample0 = !digitalRead(IR_REC_RD_PIN);
     delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
     sample1 = !digitalRead(IR_REC_RD_PIN);
     delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
     sample2 = !digitalRead(IR_REC_RD_PIN);
     
-    Serial.print("Sample 0/1/2: ");
-    Serial.print(sample0);
-    Serial.print(" / ");
-    Serial.print(sample1);
-    Serial.print(" / ");
-    Serial.print(sample2);
-    Serial.println();
+    // Serial.print("Sample 0/1/2: ");
+    // Serial.print(sample0);
+    // Serial.print(" / ");
+    // Serial.print(sample1);
+    // Serial.print(" / ");
+    // Serial.print(sample2);
+    // Serial.println();
 
     if (sample0 || sample1 || sample2) {
+      Serial.println("-----------");
+      Serial.println("Found data, attempting to lock");
       state = "lock";
-      counter = 0;
+      for (int i = 0; i < 8; i++) {
+        startBuff.push(0);
+      }
+      for (int i = 0; i < 16; i++) {
+        endBuff.push(0);
+      }
+      memset(channSamp, 0, sizeof(channSamp));
+      memset(updnSamp, 0, sizeof(updnSamp));
+      lastTime = millis();
     }
   } else if (state == "lock") {
-      if (counter > 15) {
+      if ((millis() - lastTime) > 400) {
         Serial.println("Timed out waiting for lock");
         state = "wait";
       }
+      // 001 -> wait between 1170 - 1485us for perfect skip to next sample??
+      // 011 -> wait between 885 - 1170us for perfect skip to next sample??
+      // 110 -> wait between 570 - 855us for perfect skip to next sample??
+      // 100 -> wait between 255 - 570us for perfect skip to next sample??
+
       sample0 = !digitalRead(IR_REC_RD_PIN);
       delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
       sample1 = !digitalRead(IR_REC_RD_PIN);
       delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
       sample2 = !digitalRead(IR_REC_RD_PIN);
-      if (!sample0 && !sample1 && sample2) {
-        Serial.println("Early");
-        delayMicroseconds(200);
-      } else if (!sample0 && sample1 && sample2) {
-        Serial.println("A little too early");
-        delayMicroseconds(100);
-      } else if (!sample0 && sample1 && sample2) {
-        Serial.println("A little too early");
-        delayMicroseconds(100);
-      } else if (!sample0 && sample1 && !sample2) {
-        Serial.println("Locked!");
-        delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
-        state = "looking";
-        startBuff.clear();
-        counter = 0;
-      } else if (sample0 && !sample1 && !sample2) {
-        Serial.println("Late");
-      } else {
-        Serial.println("Detected 111 which shouldn't happen");
-      }
-      counter++;
 
+      if (!sample0 && !sample1 && sample2) {
+          Serial.println("Early");
+          delayMicroseconds(1327);
+      } else if (!sample0 && sample1 && sample2) {
+          Serial.println("Locked?");
+          state = "look";
+          startBuff.clear();
+          lastTime = millis();
+          // delayMicroseconds(1027);
+      } else if (!sample0 && sample1 && !sample2) {
+          Serial.println("Locked!");
+          delayMicroseconds(1200);
+          state = "look";
+          startBuff.clear();
+          lastTime = millis();
+      } else if (sample0 && !sample1 && !sample2) {
+          Serial.println("Late");
+          delayMicroseconds(412);
+      } else if (sample0 && sample1 && !sample2) {
+          Serial.println("Slightly late");
+          delayMicroseconds(712);
+      } else if (sample0 && sample1 && sample2) {
+          Serial.println("Detected 111 which shouldn't happen");
+          delayMicroseconds(890);
+      } else if (!sample0 && !sample1 && !sample2) {
+          Serial.println("Detected 000. Missed data?");
+          delayMicroseconds(35);
+      } else {
+          Serial.print("Detected something random. ");
+          Serial.print("Sample 0/1/2: ");
+          Serial.print(sample0);
+          Serial.print(" / ");
+          Serial.print(sample1);
+          Serial.print(" / ");
+          Serial.print(sample2);
+          Serial.println();
+      }
   } else if (state == "look") {
-      if (counter > 24) {
+      if ((millis() - lastTime) > 400) {
         Serial.println("Timed out looking for start flag");
         state = "wait";
       }
       sample0 = !digitalRead(IR_REC_RD_PIN);
       startBuff.unshift(sample0);
       if (sample0) {
-        delayMicroseconds(tPwhMicros);
+        delayMicroseconds(tPwhMicros-5);
       } else {
-        delayMicroseconds(tPwlMicros);
+        delayMicroseconds(tPwlMicros-5);
       }
       if (allOnes(&startBuff)) {
         Serial.println("Flag found, packet time");
         state = "build";
-        memset(channSamp, 0, sizeof(channSamp));
-        memset(updnSamp, 0, sizeof(updnSamp));
-
       }
-      counter++;
   } else if (state == "build") {
       sample0 = !digitalRead(IR_REC_RD_PIN);
       calibrate = bool(sample0);
       if (calibrate) {
-        delayMicroseconds(tPwhMicros);
+        delayMicroseconds(tPwhMicros-5);
       } else {
-        delayMicroseconds(tPwlMicros);
+        delayMicroseconds(tPwlMicros-5);
       }
 
-      for (int i = 0; i < 4; i++) {
+      for (int i = 0; i < 8; i++) {
         sample0 = !digitalRead(IR_REC_RD_PIN);
         channSamp[i] = sample0;
         if (sample0) {
-          delayMicroseconds(tPwhMicros);
+          delayMicroseconds(tPwhMicros-5);
         } else {
-          delayMicroseconds(tPwlMicros);
+          delayMicroseconds(tPwlMicros-5);
         }
       }
 
-      for (int i = 0; i < 4; i++) {
+      for (int i = 0; i < 8; i++) {
         sample0 = !digitalRead(IR_REC_RD_PIN);
         updnSamp[i] = sample0;
         if (sample0) {
-          delayMicroseconds(tPwhMicros);
+          delayMicroseconds(tPwhMicros-5);
         } else {
-          delayMicroseconds(tPwlMicros);
+          delayMicroseconds(tPwlMicros-5);
         }
       }
     
       Serial.println("Found all data");
+
+      Serial.println(calibrate);
+      for (int i = 0; i < 8; i++) {
+        Serial.print(channSamp[i]);
+      }
+      Serial.println();
+      for (int i = 0; i < 8; i++) {
+        Serial.print(updnSamp[i]);
+      }
+      Serial.println();
+
       state = "ending";
       endBuff.clear();
-      counter = 0;
       timesEndFlagSeen = 0;
+      lastTime = millis();
   } else if (state == "ending") {
-    if (counter > 24) {
+    if ((millis() - lastTime) > 400) {
       Serial.println("Timed out waiting for end flag");
       state = "wait";
     }
     sample0 = !digitalRead(IR_REC_RD_PIN);
+    Serial.print(sample0);
     endBuff.unshift(sample0);
     if (sample0) {
-      delayMicroseconds(tPwhMicros);
+      delayMicroseconds(tPwhMicros-5);
     } else {
-      delayMicroseconds(tPwlMicros);
+      delayMicroseconds(tPwlMicros-5);
     }
 
     if (endFlagInBuffer(&endBuff)) {
+      Serial.println("Saw end flag once");
       timesEndFlagSeen++;
     }
 
@@ -316,6 +360,5 @@ void loop() {
       state = "wait";
       parsePacket(calibrate, bitArrToByte(channSamp), bitArrToByte(updnSamp));
     }
-    counter++;
   }
 }

@@ -13,8 +13,8 @@
 
 /*
 Packet Structure:
-|--------START FLAG---------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
-| (010101010101)x2+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
+|------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
+| (01010101)x8+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
 calibrate = 1 if calibrating, 0 if actuating
 cal up/dn = 0/3 if neither, 1 if dn, 2 if up
 channel = 0-9, specifies which motor to use. Numbers >9 reserved
@@ -72,11 +72,13 @@ void sendOne() {
   OCR2B = HALF_DUTY_COUNT;
   delayMicroseconds(tPwhMicros);
   OCR2B = 0;
+  Serial.print(1);
 }
 
 void sendZero() {
   OCR2B = 0;
   delayMicroseconds(tPwlMicros);
+  Serial.print(0);
 }
 
 void sendByteRaw(byte sendVal) {
@@ -111,23 +113,33 @@ Packet getDefaultPacket() {
 
 void sendPacket(Packet toBeSent) {
   Serial.println("Sending packet");
-  sendIntRaw(toBeSent.start_flag_locking);
+  for (int i = 0; i < 30; i++) {
+    sendIntRaw(toBeSent.start_flag_locking);
+  }
   sendIntRaw(toBeSent.start_flag_remainder);
   
+  Serial.print("_");
+
   if (toBeSent.calibrating) {
     sendOne();
   } else{
     sendZero();
   }
+  
+  Serial.print("_");
 
   sendByteRaw(toBeSent.channel);
   
+  Serial.print("_");
+
   sendByteRaw(toBeSent.up_dn);
 
+  Serial.print("_");
+
   sendIntRaw(toBeSent.end_flag_half);
   sendIntRaw(toBeSent.end_flag_half);
 
-  Serial.println("Packet sent");
+  Serial.println("\nPacket sent");
 }
 
 bool calibrating = false;
@@ -138,13 +150,13 @@ int cal_up_rd;
 int cal_dn_rd;
 int test_chann_button_rd;
 Packet toSend;
-
+bool anythingPressed = false;
 bool debug = true;
 void loop() {
-  cal_toggle_rd = digitalRead(CALIBRATE_TOGGLE_PIN);
+  cal_toggle_rd = 1; //digitalRead(CALIBRATE_TOGGLE_PIN);
   test_chann_button_rd = digitalRead(TEST_SEND_BUTTON_PIN);
-  cal_up_rd = digitalRead(CAL_UP_PIN);
-  cal_dn_rd = digitalRead(CAL_DN_PIN);
+  cal_up_rd = 1; //digitalRead(CAL_UP_PIN);
+  cal_dn_rd = 1; //digitalRead(CAL_DN_PIN);
   // Remember there's pullups, so LOW = active
 
   if (debug) {
@@ -166,6 +178,8 @@ void loop() {
   
   // --------READ CALIBRATE BUTTON--------
   if (!(cal_toggle_rd == HIGH)) {
+    Serial.println("Cal pressed");
+    anythingPressed = true;
     cal_channel = 0b1010;
     if (!calibrating) {
       Serial.print("Calibration activated, cal channel is ");
@@ -189,8 +203,9 @@ void loop() {
   }
   // --------READ CHANNEL 0 BUTTON--------
   if (!(test_chann_button_rd == HIGH)) {
-    //Serial.println("Channel 0 pressed");
-
+    Serial.println("Channel 0 pressed");
+    anythingPressed = true;
+    unsigned long timeStart = millis();
     toSend = getDefaultPacket();
     toSend.channel = 0b0000;
     toSend.calibrating = calibrating;
@@ -199,12 +214,15 @@ void loop() {
       //Serial.println("Calibration channel is now 0");
     }
     sendPacket(toSend);
+    Serial.print("Took ");
+    Serial.print(millis() - timeStart);
+    Serial.println("ms to send");
     return;
   }
   // --------READ UP BUTTON--------
   if (!(cal_up_rd == HIGH)) {
     Serial.println("Up button pressed");
-
+    anythingPressed = true;
     toSend = getDefaultPacket();
     toSend.channel = cal_channel;
     toSend.calibrating = calibrating;
@@ -215,7 +233,7 @@ void loop() {
   // --------READ DN BUTTON--------
   if (!(cal_dn_rd == HIGH)) {
     Serial.println("Down button pressed");
-
+    anythingPressed = true;
     toSend = getDefaultPacket();
     toSend.channel = cal_channel;
     toSend.calibrating = calibrating;
@@ -225,5 +243,8 @@ void loop() {
   }
 
   // Small delay to avoid resending
-  delay(100);
+  if (anythingPressed) {
+    delay(500);
+  }
+  anythingPressed = false;
 }

@@ -4,17 +4,20 @@
 #define CHANNEL_0_PIN 9
 #define CHANNEL_1_PIN 10
 #define IR_REC_RD_PIN 19
-#define tPwlMicros 900
-#define tPwhMicros 600
-#define SAMPLE_WAIT_TIME_MICROS 300
-#define TOP F_CPU / (2 * 256 * 50)
 #define NUM_CHANNELS 2
+
+#define TOP F_CPU / (2 * 256 * 50)
+
+#define BUFFER_SIZE 1200
+#define FILL_BUFF_SAMP_PERIOD_US 150
+#define START_FLAG_TIMEOUT_CYCLES 500
+#define END_FLAG_TIMEOUT_CYCLES 500
 // use built-in LED for cal
 
 /*
 Packet Structure:
 |------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
-| (01010101)x8+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
+| (01010101)x?+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
 calibrate = 1 if calibrating, 0 if actuating
 cal up/dn = 0/3 if neither, 1 if dn, 2 if up
 channel = 0-9, specifies which motor to use. Numbers >9 reserved
@@ -30,7 +33,7 @@ If cal is not selected and channel is pressed send cal=0, channel=channel, cal_u
 struct Packet {
   bool calibrating;
   byte channel;
-  byte up_dn;
+  byte updn;
 };
 
 void setup() {
@@ -88,41 +91,47 @@ void setup() {
 }
 
 int stepSize = TOP * 0.0005;
-void parsePacket(bool calibrating, byte channel, byte up_dn) {
-  if ((channel < 0) || (channel >= NUM_CHANNELS)) {
+void parsePacket(Packet p) {
+  if ((p.channel < 0) || (p.channel > 10)) {
     return;
   }
   
-  if (calibrating) {
+  if (p.calibrating) {
     digitalWrite(LED_BUILTIN, HIGH);
   } else {
     digitalWrite(LED_BUILTIN, LOW);
   }
 
-  if (calibrating && up_dn == 1 && channel == 0) {
+  if (p.calibrating && p.updn == 1 && p.channel == 0) {
+    Serial.println("Cal channel 0 down");
     int temp = OCR1A - stepSize;
     OCR1A = (temp < 0) ? 0 : temp;
     // EEPROM is byte addressed. Correct address per channel should be channel * sizeof(uint16_t) since OCR1A is 16 bits
     // EEPROM.put(0, OCR1A);
-  } else if (calibrating && up_dn == 2 && channel == 0) {
+  } else if (p.calibrating && p.updn == 2 && p.channel == 0) {
+    Serial.println("Cal channel 0 up");
     int temp = OCR1A + stepSize;
     OCR1A = (temp >= TOP) ? TOP : temp;
     // EEPROM.put(0, OCR1A);
-  } else if (calibrating && up_dn == 1 && channel == 1) {
+  } else if (p.calibrating && p.updn == 1 && p.channel == 1) {
+    Serial.println("Cal channel 1 down");
     int temp = OCR1B - stepSize;
     OCR1B = (temp < 0) ? 0 : temp;
     // EEPROM.put(sizeof(uint16_t), OCR1B);
-  } else if (calibrating && up_dn == 2 && channel == 1) {
+  } else if (p.calibrating && p.updn == 2 && p.channel == 1) {
+    Serial.println("Cal channel 1 up");
     int temp = OCR1B + stepSize;
     OCR1B = (temp >= TOP) ? TOP : temp;
     // EEPROM.put(sizeof(uint16_t), OCR1B);
-  } else if (channel == 0) {
+  } else if (p.channel == 0 && !p.calibrating) {
+    Serial.println("Actuating channel 0");
     int prev = OCR1A;
     int temp = prev + (50 * stepSize);
     OCR1A = (temp >= TOP) ? TOP : temp;
     delay(1500);
     OCR1A = prev;
-  } else if (channel == 1) {
+  } else if (p.channel == 1 && !p.calibrating) {
+    Serial.println("Actuating channel 1");
     int prev = OCR1B;
     int temp = prev + (50 * stepSize);
     OCR1B = (temp >= TOP) ? TOP : temp;
@@ -131,234 +140,396 @@ void parsePacket(bool calibrating, byte channel, byte up_dn) {
   }
 }
 
-byte bitArrToByte(int x[]) {
-  const int arrLen = sizeof(x) / sizeof(x[0]);
-  if (arrLen != 8) {
-    return 0;
+void fillBuffer(CircularBuffer<bool, BUFFER_SIZE>* x) {
+  int samp;
+  for (int i = 0; i < BUFFER_SIZE; i++) {
+    samp = !digitalRead(IR_REC_RD_PIN);
+    x->push(bool(samp));
+    delayMicroseconds(FILL_BUFF_SAMP_PERIOD_US);
+  }
+}
+
+int getOneLength(CircularBuffer<bool, BUFFER_SIZE>* x) {
+  int startInd = 0;
+  int endInd = 0;
+  bool waitingForNegEdge = false;
+  bool waitingForPosEdge = true;
+  bool prevSample = true;
+  bool currSample;
+  for (int i = 0; i < 100; i++) {
+    currSample = x->first();
+    // 0 -> 1
+    if (!prevSample && currSample && waitingForPosEdge) {
+      startInd = i;
+      waitingForNegEdge = true;
+      waitingForPosEdge = false;
+    // 1 -> 0
+    } else if (prevSample && !currSample && waitingForNegEdge) {
+      endInd = i;
+      return endInd - startInd;
+    }
+    x->shift();
+    prevSample = currSample;
+  }
+  return -1;
+}
+
+int getZeroLength(CircularBuffer<bool, BUFFER_SIZE>* x) {
+  int startInd = 0;
+  int endInd = 0;
+  bool waitingForNegEdge = true;
+  bool waitingForPosEdge = false;
+  bool prevSample = false;
+  bool currSample;
+  for (int i = 0; i < 100; i++) {
+    currSample = x->first();
+    // 1 -> 0
+    if (prevSample && !currSample && waitingForNegEdge) {
+      startInd = i;
+      waitingForNegEdge = false;
+      waitingForPosEdge = true;
+    // 0 -> 1
+    } else if (!prevSample && currSample && waitingForPosEdge) {
+      endInd = i;
+      return endInd - startInd;
+    }
+    
+    x->shift();
+    prevSample = currSample;
+  }
+  return -1;
+}
+
+bool popOneVal(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ, bool consumeMax) {
+  // Guaranteed that max-min is 1
+  bool first = x->first();
+  bool found = false;
+  int relevantMin = (first) ? minO : minZ;
+  int maxInd = x->size();
+  int counter = 0;
+  if (maxInd < relevantMin) {
+    // Serial.println("There's fewer than the min samples left. Clearing. This is probably an error.");
+    x->clear();
+    return first;
   }
 
-  byte res = 0;
-  bitWrite(res, 0, x[7]);
-  bitWrite(res, 1, x[6]);
-  bitWrite(res, 2, x[5]);
-  bitWrite(res, 3, x[4]);
-  bitWrite(res, 4, x[3]);
-  bitWrite(res, 5, x[2]);
-  bitWrite(res, 6, x[1]);
-  bitWrite(res, 7, x[0]);
+  while (!found && (counter < maxInd)) {
+    if ((*x)[counter] != first) {
+      found = true;
+    }
+    counter++;
+  }
+
+  counter--; // Final is where the next bit starts, so the current ends 1 before.
+  // Clean X -> Y
+  if (found && counter == relevantMin) {
+    for (int i = 0; i < relevantMin; i++) {
+      x->shift();
+    }
+    return first;
+  } else if (found && (counter == relevantMin + 1)) {
+    for (int i = 0; i < relevantMin + 1; i++) {
+      x->shift();
+    }
+    return first;
+  } 
+  
+  if (found && (counter > (relevantMin + 1))) {
+    int amt = (consumeMax) ? relevantMin + 1 : relevantMin;
+    for (int i = 0; i < amt; i++) {
+      // Serial.print(x->first());
+      x->shift();
+      counter--;
+    }
+  }
+  
+  if (found && (counter < relevantMin)) {
+    for (int i = 0; i < counter; i++) {
+      x->shift();
+    }
+    return first;
+  } else if (found) {
+    return first;
+  }
+
+  // There's nothing left after this one. 
+  if (!found && (maxInd <= (relevantMin + 1))) {
+    x->clear();
+    return first;
+  }
+  
+  // There's at least 1 more value but everything until the end is all the same value, take the min. I think it'll work out since max-min = 1
+  if (!found && (maxInd > (relevantMin + 1))) {
+    int amt = (consumeMax) ? relevantMin + 1 : relevantMin;
+    for (int i = 0; i < amt; i++) {
+      x->shift();
+    }
+    return first;
+  }
+}
+
+bool flagSearch(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ) {
+  Serial.println("Searching for start flag");
+  int onesCount = 0;
+  int count = 0;
+  bool currSample;
+  while (!(x->isEmpty()) && count < START_FLAG_TIMEOUT_CYCLES) {
+    if (onesCount == 4) {
+      // Serial.println("Found it!");
+      return true;
+    }
+
+    currSample = popOneVal(x, minO, minZ, true);
+    if (currSample) {
+      onesCount++;
+    } else {
+      onesCount = 0;
+    }
+    count++;
+  }
+  // Serial.println("Not found");
+  return false;
+}
+
+bool endFlagSearch(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ) {
+  byte onesCount = 0;
+  byte zerosCount = 0;
+  byte count = 0;
+  bool currSample;
+  bool fourOnes = false;
+  bool nineOnes = false;
+  bool threeZeros = false;
+  // printBufferContents(x);
+  while (!(x->isEmpty()) && count < END_FLAG_TIMEOUT_CYCLES) {
+    if (onesCount == 4 && !fourOnes && !nineOnes && !threeZeros) {
+      Serial.println("Found 4 1s");
+      fourOnes = true;
+      onesCount = 0;
+      zerosCount = 0;
+      // printBufferContents(x);
+    } else if (zerosCount == 3 && fourOnes && !nineOnes && !threeZeros) {
+      Serial.println("Found 4 0s");
+      threeZeros = true;
+      onesCount = 0;
+      zerosCount = 0;
+      // printBufferContents(x);
+    } else if (onesCount == 9 && fourOnes && threeZeros && !nineOnes) {
+      Serial.println("Found 9 1s");
+      nineOnes = true;
+      onesCount = 0;
+      zerosCount = 0;
+    }
+
+    if (fourOnes && threeZeros && nineOnes) {
+      return true;
+    }
+
+    currSample = popOneVal(x, minO, minZ, !(fourOnes && threeZeros));
+    if (currSample) {
+      zerosCount = 0;
+      onesCount++;
+    } else {
+      onesCount = 0;
+      zerosCount++;
+    }
+    count++;
+  }
+  return false;
+}
+
+Packet constructPacket(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ) {
+  bool cal;
+  bool samp;
+  // These print statements make it more stable??
+  // printBufferContents(x);
+  // cal is most often 0, consume max
+  samp = popOneVal(x, minO, minZ, true);
+  cal = samp;
+  // If samp == 1, then the break will be a 0.
+  samp = popOneVal(x, minO, minZ, samp);
+
+  if (samp == cal) {
+    Serial.println("Break after cal. bit not found");
+    Packet res;
+    res.calibrating = 0;
+    res.channel = 10;
+    res.updn = 0;
+    return res;
+  }
+  
+  byte ch;
+  for (int i = 0; i < 8; i++) {
+    if (i > 0 && i % 2 == 0) {
+      samp = popOneVal(x, minO, minZ, false);
+      if (bool(bitRead(ch, i-1)) == samp) {
+        Serial.println("Break in ch bits not found");
+        Packet res;
+        res.calibrating = 0;
+        res.channel = 10;
+        res.updn = 0;
+        return res;
+      }
+    }
+    samp = popOneVal(x, minO, minZ, false);
+    bitWrite(ch, i, int(samp));
+  }
+
+  byte updn;
+  for (int i = 0; i < 8; i++) {
+    if (i > 0 && i % 2 == 0) {
+      samp = popOneVal(x, minO, minZ, false);
+      if (bool(bitRead(updn, i-1)) == samp) {
+        Serial.println("Break in updn bits not found");
+        Packet res;
+        res.calibrating = 0;
+        res.channel = 10;
+        res.updn = 0;
+        return res;
+      }
+    }
+    samp = popOneVal(x, minO, minZ, false);
+    bitWrite(updn, i, int(samp));
+  }
+
+  Packet res;
+  res.calibrating = cal;
+  res.channel = ch;
+  res.updn = updn;
   return res;
 }
 
-bool allOnes(CircularBuffer<int, 8>* x) {
-  Serial.print("Circular start buffer has: ");
-  for (int i = 0; i < 8; i++) {
+void printBufferContents(CircularBuffer<bool, BUFFER_SIZE>* x) {
+  for (int i = 0; i < x->size(); i++) {
     Serial.print((*x)[i]);
-    if (!(*x)[i]) {
-      Serial.println();
-      return false;
-    }
   }
-  Serial.println();
-  return true;
+    Serial.println();
 }
 
-bool endFlagInBuffer(CircularBuffer<int, 16>* x) {
-  for (int i = 0; i < 6; i++) {
-    if (!(*x)[i]) {
-      return false;
-    }
-  }
-
-  for (int i = 0; i < 5; i++) {
-    if ((*x)[i]) {
-      return false;
-    }
-  }
-
-  for (int i = 0; i < 5; i++) {
-    if (!(*x)[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-CircularBuffer<int, 8> startBuff;
-CircularBuffer<int, 16> endBuff;
-String state = "wait";
-int channSamp[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-int updnSamp[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-bool calibrate = false;
-int timesEndFlagSeen = 0;
-int sample0, sample1, sample2;  // VS1838B is active low, 0 = high
-unsigned long lastTime = millis();
+CircularBuffer<bool, BUFFER_SIZE> sampleBuffer;
+int samp;
+byte oneLength;
+byte minOneLength = 1000;
+byte maxOneLength = 0;
+byte zeroLength;
+byte minZeroLength = 1000;
+byte maxZeroLength = 0;
+bool flagFound;
+bool foundEnd;
+Packet recPacket;
 void loop() {
-  if (state == "wait") {
-    lastTime = millis();
-    sample0 = !digitalRead(IR_REC_RD_PIN);
-    delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
-    sample1 = !digitalRead(IR_REC_RD_PIN);
-    delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
-    sample2 = !digitalRead(IR_REC_RD_PIN);
+  // Samples are active low
+  samp = !digitalRead(IR_REC_RD_PIN);
+  if (samp) {
+    Serial.println("---------");
+    sampleBuffer.clear();
+    minZeroLength = 1000;
+    maxZeroLength = 0;
+    minOneLength = 1000;
+    maxOneLength = 0;
+    fillBuffer(&sampleBuffer);
+
+    // ----Find min/max length of a 1 sample---
+    for (int i = 0; i < 4; i++) {
+      oneLength = getOneLength(&sampleBuffer);
+
+      if (oneLength <= 0) {
+        Serial.println("Went through everything and didn't find a 1???");
+        return;
+      }
+
+      if (oneLength > maxOneLength) {
+        maxOneLength = oneLength;
+      }
+
+      if (oneLength < minOneLength) {
+        minOneLength = oneLength;
+      }
+    }
+    // Serial.print("Min 1 length in samples: ");
+    // Serial.println(minOneLength);
+    // Serial.print("Max 1 length in samples: ");
+    // Serial.println(maxOneLength);
+
+    // ----Find min/max length of a 0 sample---
+    for (int i = 0; i < 4; i++) {
+      zeroLength = getZeroLength(&sampleBuffer);
+
+      if (zeroLength <= 0) {
+        // Serial.println("Went through everything and didn't find a 0???");
+        return;
+      }
+
+      if (zeroLength > maxZeroLength) {
+        maxZeroLength = zeroLength;
+      }
+
+      if (zeroLength < minZeroLength) {
+        minZeroLength = zeroLength;
+      }
+    }
+    // Serial.print("Min 0 length in samples: ");
+    // Serial.println(minZeroLength);
+    // Serial.print("Max 0 length in samples: ");
+    // Serial.println(maxZeroLength);
+
+    // ------ASSERTIONS-----
+    if ((maxOneLength - minOneLength) > 1) {
+      // Serial.println("Too much variation in 1 length");
+      return;
+    }
+
+    if ((maxZeroLength - minZeroLength) > 1) {
+      // Serial.println("Too much variation in 0 length");
+      return;
+    }
+
     
-    // Serial.print("Sample 0/1/2: ");
-    // Serial.print(sample0);
-    // Serial.print(" / ");
-    // Serial.print(sample1);
-    // Serial.print(" / ");
-    // Serial.print(sample2);
-    // Serial.println();
-
-    if (sample0 || sample1 || sample2) {
-      Serial.println("-----------");
-      Serial.println("Found data, attempting to lock");
-      state = "lock";
-      for (int i = 0; i < 8; i++) {
-        startBuff.push(0);
-      }
-      for (int i = 0; i < 16; i++) {
-        endBuff.push(0);
-      }
-      memset(channSamp, 0, sizeof(channSamp));
-      memset(updnSamp, 0, sizeof(updnSamp));
-      lastTime = millis();
+    if (minOneLength == 1) {
+      // Serial.println("1 length is 1 sample. Too small to disambiguate");
+      return;
     }
-  } else if (state == "lock") {
-      if ((millis() - lastTime) > 400) {
-        Serial.println("Timed out waiting for lock");
-        state = "wait";
-      }
-      // 001 -> wait between 1170 - 1485us for perfect skip to next sample??
-      // 011 -> wait between 885 - 1170us for perfect skip to next sample??
-      // 110 -> wait between 570 - 855us for perfect skip to next sample??
-      // 100 -> wait between 255 - 570us for perfect skip to next sample??
 
-      sample0 = !digitalRead(IR_REC_RD_PIN);
-      delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
-      sample1 = !digitalRead(IR_REC_RD_PIN);
-      delayMicroseconds(SAMPLE_WAIT_TIME_MICROS);
-      sample2 = !digitalRead(IR_REC_RD_PIN);
+    if (minZeroLength == 1) {
+      // Serial.println("0 length is 1 sample. Too small to disambiguate");
+      return;
+    }
 
-      if (!sample0 && !sample1 && sample2) {
-          Serial.println("Early");
-          delayMicroseconds(1327);
-      } else if (!sample0 && sample1 && sample2) {
-          Serial.println("Locked?");
-          state = "look";
-          startBuff.clear();
-          lastTime = millis();
-          // delayMicroseconds(1027);
-      } else if (!sample0 && sample1 && !sample2) {
-          Serial.println("Locked!");
-          delayMicroseconds(1200);
-          state = "look";
-          startBuff.clear();
-          lastTime = millis();
-      } else if (sample0 && !sample1 && !sample2) {
-          Serial.println("Late");
-          delayMicroseconds(412);
-      } else if (sample0 && sample1 && !sample2) {
-          Serial.println("Slightly late");
-          delayMicroseconds(712);
-      } else if (sample0 && sample1 && sample2) {
-          Serial.println("Detected 111 which shouldn't happen");
-          delayMicroseconds(890);
-      } else if (!sample0 && !sample1 && !sample2) {
-          Serial.println("Detected 000. Missed data?");
-          delayMicroseconds(35);
-      } else {
-          Serial.print("Detected something random. ");
-          Serial.print("Sample 0/1/2: ");
-          Serial.print(sample0);
-          Serial.print(" / ");
-          Serial.print(sample1);
-          Serial.print(" / ");
-          Serial.print(sample2);
-          Serial.println();
-      }
-  } else if (state == "look") {
-      if ((millis() - lastTime) > 400) {
-        Serial.println("Timed out looking for start flag");
-        state = "wait";
-      }
-      sample0 = !digitalRead(IR_REC_RD_PIN);
-      startBuff.unshift(sample0);
-      if (sample0) {
-        delayMicroseconds(tPwhMicros-5);
-      } else {
-        delayMicroseconds(tPwlMicros-5);
-      }
-      if (allOnes(&startBuff)) {
-        Serial.println("Flag found, packet time");
-        state = "build";
-      }
-  } else if (state == "build") {
-      sample0 = !digitalRead(IR_REC_RD_PIN);
-      calibrate = bool(sample0);
-      if (calibrate) {
-        delayMicroseconds(tPwhMicros-5);
-      } else {
-        delayMicroseconds(tPwlMicros-5);
-      }
-
-      for (int i = 0; i < 8; i++) {
-        sample0 = !digitalRead(IR_REC_RD_PIN);
-        channSamp[i] = sample0;
-        if (sample0) {
-          delayMicroseconds(tPwhMicros-5);
-        } else {
-          delayMicroseconds(tPwlMicros-5);
-        }
-      }
-
-      for (int i = 0; i < 8; i++) {
-        sample0 = !digitalRead(IR_REC_RD_PIN);
-        updnSamp[i] = sample0;
-        if (sample0) {
-          delayMicroseconds(tPwhMicros-5);
-        } else {
-          delayMicroseconds(tPwlMicros-5);
-        }
-      }
     
-      Serial.println("Found all data");
+    // if (DEBUG_PRINT) {
+    //   Serial.println("Buffer contents post 'locking': ");
+    // //   printBufferContents(&sampleBuffer);
+    // }
 
-      Serial.println(calibrate);
-      for (int i = 0; i < 8; i++) {
-        Serial.print(channSamp[i]);
-      }
-      Serial.println();
-      for (int i = 0; i < 8; i++) {
-        Serial.print(updnSamp[i]);
-      }
-      Serial.println();
-
-      state = "ending";
-      endBuff.clear();
-      timesEndFlagSeen = 0;
-      lastTime = millis();
-  } else if (state == "ending") {
-    if ((millis() - lastTime) > 400) {
-      Serial.println("Timed out waiting for end flag");
-      state = "wait";
-    }
-    sample0 = !digitalRead(IR_REC_RD_PIN);
-    Serial.print(sample0);
-    endBuff.unshift(sample0);
-    if (sample0) {
-      delayMicroseconds(tPwhMicros-5);
-    } else {
-      delayMicroseconds(tPwlMicros-5);
+    // -----Search remaining buffer vals for the flag----
+    flagFound = flagSearch(&sampleBuffer, minOneLength, minZeroLength);
+    if (!flagFound) {
+      return;
     }
 
-    if (endFlagInBuffer(&endBuff)) {
-      Serial.println("Saw end flag once");
-      timesEndFlagSeen++;
+    // if (DEBUG_PRINT) {
+    //   Serial.println("Buffer contents post start flag: ");
+    // //   printBufferContents(&sampleBuffer);
+    // }
+
+    // ------- Build packet----------
+    recPacket = constructPacket(&sampleBuffer, minOneLength, minZeroLength);
+    Serial.println("Packet contents: ");
+    Serial.print("Cal?: ");
+    Serial.println(recPacket.calibrating);
+    Serial.print("Channel: ");
+    Serial.println(recPacket.channel);
+    Serial.print("UpDn: ");
+    Serial.println(recPacket.updn);
+    Serial.print("Remaining vals: ");
+    Serial.println(sampleBuffer.size());
+    // ------Find end flag---------
+    foundEnd = endFlagSearch(&sampleBuffer, minOneLength, minZeroLength);
+    if (foundEnd) {
+      Serial.println("Found the end flag");
+      parsePacket(recPacket);
     }
 
-    if (timesEndFlagSeen == 2) {
-      state = "wait";
-      parsePacket(calibrate, bitArrToByte(channSamp), bitArrToByte(updnSamp));
-    }
+    // Avoid scanning the same packet again
+    delay(200);
   }
 }

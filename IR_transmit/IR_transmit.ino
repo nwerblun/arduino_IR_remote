@@ -4,8 +4,8 @@
 #define CAL_DN_PIN 10
 #define CALIBRATE_TOGGLE_PIN 8
 #define IR_LED_TX_PIN 3
-#define tPwlMicros 900
-#define tPwhMicros 600
+#define tPwlMicros 895
+#define tPwhMicros 595
 // use built-in LED for cal active for now
 
 #define TOP F_CPU / (8 * 38000)
@@ -13,8 +13,8 @@
 
 /*
 Packet Structure:
-|------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
-| (01010101)x8+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
+|------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|-----END FLAG-----|
+| (01010101)x?+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111 |
 calibrate = 1 if calibrating, 0 if actuating
 cal up/dn = 0/3 if neither, 1 if dn, 2 if up
 channel = 0-9, specifies which motor to use. Numbers >9 reserved
@@ -28,9 +28,9 @@ If cal is not selected and channel is pressed send cal=0, channel=channel, cal_u
 */
 
 struct Packet {
-  int start_flag_locking = 0b1010101010101010;
-  int start_flag_remainder = 0b1111111110101010;
-  int end_flag_half = 0b1111100000111111;
+  int start_flag_locking = 0b0101010101010101;
+  int start_flag_remainder = 0b1111010101010101;
+  int end_flag = 0b1111111110001111;
   bool calibrating = false;
   byte channel = 0b1010;
   byte up_dn = 0b0000;
@@ -72,18 +72,25 @@ void sendOne() {
   OCR2B = HALF_DUTY_COUNT;
   delayMicroseconds(tPwhMicros);
   OCR2B = 0;
-  Serial.print(1);
+  // Serial.print(1);
 }
 
 void sendZero() {
   OCR2B = 0;
   delayMicroseconds(tPwlMicros);
-  Serial.print(0);
+  // Serial.print(0);
 }
 
 void sendByteRaw(byte sendVal) {
   int data;
   for (int i = 0; i < 8; i++) {
+    if (i > 0 && i % 2 == 0) {
+      if (bitRead(sendVal, i-1)) {
+        sendZero();
+      } else {
+        sendOne();
+      }
+    }
     data = bitRead(sendVal, i);
     if (data == 1) {
       sendOne();
@@ -113,31 +120,31 @@ Packet getDefaultPacket() {
 
 void sendPacket(Packet toBeSent) {
   Serial.println("Sending packet");
-  for (int i = 0; i < 30; i++) {
+  for (int i = 0; i < 4; i++) {
     sendIntRaw(toBeSent.start_flag_locking);
   }
   sendIntRaw(toBeSent.start_flag_remainder);
   
-  Serial.print("_");
+  // Serial.print("_");
 
   if (toBeSent.calibrating) {
     sendOne();
+    sendZero();
   } else{
     sendZero();
+    sendOne();
   }
-  
-  Serial.print("_");
+  // Serial.print("_");
 
   sendByteRaw(toBeSent.channel);
   
-  Serial.print("_");
+  // Serial.print("_");
 
   sendByteRaw(toBeSent.up_dn);
 
-  Serial.print("_");
+  // Serial.print("_");
 
-  sendIntRaw(toBeSent.end_flag_half);
-  sendIntRaw(toBeSent.end_flag_half);
+  sendIntRaw(toBeSent.end_flag);
 
   Serial.println("\nPacket sent");
 }
@@ -151,12 +158,12 @@ int cal_dn_rd;
 int test_chann_button_rd;
 Packet toSend;
 bool anythingPressed = false;
-bool debug = true;
+bool debug = false;
 void loop() {
-  cal_toggle_rd = 1; //digitalRead(CALIBRATE_TOGGLE_PIN);
+  cal_toggle_rd = digitalRead(CALIBRATE_TOGGLE_PIN);
   test_chann_button_rd = digitalRead(TEST_SEND_BUTTON_PIN);
-  cal_up_rd = 1; //digitalRead(CAL_UP_PIN);
-  cal_dn_rd = 1; //digitalRead(CAL_DN_PIN);
+  cal_up_rd = digitalRead(CAL_UP_PIN);
+  cal_dn_rd = digitalRead(CAL_DN_PIN);
   // Remember there's pullups, so LOW = active
 
   if (debug) {
@@ -202,7 +209,7 @@ void loop() {
     }
   }
   // --------READ CHANNEL 0 BUTTON--------
-  if (!(test_chann_button_rd == HIGH)) {
+  else if (!(test_chann_button_rd == HIGH)) {
     Serial.println("Channel 0 pressed");
     anythingPressed = true;
     unsigned long timeStart = millis();
@@ -220,7 +227,7 @@ void loop() {
     return;
   }
   // --------READ UP BUTTON--------
-  if (!(cal_up_rd == HIGH)) {
+  else if (!(cal_up_rd == HIGH)) {
     Serial.println("Up button pressed");
     anythingPressed = true;
     toSend = getDefaultPacket();
@@ -231,7 +238,7 @@ void loop() {
     return;
   }
   // --------READ DN BUTTON--------
-  if (!(cal_dn_rd == HIGH)) {
+  else if (!(cal_dn_rd == HIGH)) {
     Serial.println("Down button pressed");
     anythingPressed = true;
     toSend = getDefaultPacket();
@@ -243,8 +250,5 @@ void loop() {
   }
 
   // Small delay to avoid resending
-  if (anythingPressed) {
-    delay(500);
-  }
-  anythingPressed = false;
+  delay(50);
 }

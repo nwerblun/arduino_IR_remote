@@ -9,18 +9,18 @@
 #define TOP F_CPU / (2 * 256 * 50)
 
 #define BUFFER_SIZE 960
-#define SAMPLE_BUFFER_SIZE int(1.5 * BUFFER_SIZE / (8335 / 1667))
+#define SAMPLE_BUFFER_SIZE int(1.5 * BUFFER_SIZE / (8335 / 1667))  // Somewhat arbitrary. I figured I would be taking BUFFER_SIZE / (fs / baud) samples, so 1.5x it for margin
 
 #define PLL_STEP_SIZE 65536 / int(8335 / 1667)  // 2^16 / (fs / bit rate) where bit rate is 1/600us assuming bit period is 600us
-#define FILL_BUFF_SAMP_PERIOD_US 120  // 8.335kHz sample rate
+#define FILL_BUFF_SAMP_PERIOD_US 120  // 8.335kHz sample rate. Data rate is ~1.67kHz, so 5x sample rate. Arbitrary, mostly limited by memory
 // use built-in LED for cal
 
 /*
 Packet Structure:
-|------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|------END FLAG------|
-| (01010101)x?+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111x2 |
+|----START FLAG-----|-CALIBRATE?-|--CAL UP/DN--|-CHANNEL (MOTOR)-|-----END FLAG-----|
+| (01010101)x?+1111 |     X      |    XXXX     |       XXXX      | 0011111111111111 |
 calibrate = 1 if calibrating, 0 if actuating
-cal up/dn = 0/3 if neither, 1 if dn, 2 if up
+cal up/dn = 0/1 if neither, 2 if dn, 3 if up
 channel = 0-9, specifies which motor to use. Numbers >9 reserved
 
 If cal button is pressed, don't do anything except light an LED
@@ -44,7 +44,9 @@ void setup() {
    /  \  /
    _________________ Comparison threshold = OCR1A
   /    \/
-  Internal timer counts up to ICR1 (if set to use ICR1 as TOP, otherwise 255) then turns around. When it collides with OCR1A, it does something to the output based on settings in TCCR1A/B
+  Internal timer counts up to ICR1 (if set to use ICR1 as TOP, otherwise 255) then turns around (in phase correct pwm mode).
+  In fast pwm mode it counts up then resets to 0 instantly
+  When it collides with OCR1A, it does something to the output based on settings in TCCR1A/B
 
   Set up timer 1 here. Timer 0 is used for delay() so don't touch that one
   Timer 1 controls pins 9/10 which I think are referred to as channel A and B respectively
@@ -58,7 +60,7 @@ void setup() {
     
   set COM1A1 and COM1B1 to 1 so that the output is set low when up counting and high when down-counting and the threshold is met by the sawtooth wave
   set OCR1A = desired duty cycle as a % of ICR1. E.g. for 1000Hz, OCR1A = 450 gives 45% DC
-  set OCR1B = desired dc
+  set OCR1B = desired dc for channel B
   */
   Serial.begin(9600);
   pinMode(CHANNEL_0_PIN, OUTPUT);
@@ -258,6 +260,18 @@ Packet consumeData(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
 
 void getSamplePoints(byte* x, int len, CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
   // DireWolf SDR software PLL implementation based on an overflowing counter
+  /*
+    We sample every time the counter overflows. The goal is to get the counter to overflow halfway during the bit period
+    This gives us a sample right at the center of the square wave
+    The counter should then overflow exactly once every bit period, so the step size is set as 2^16 (or 32 if 32bit) / (fs/bit_rate)
+    If the bit rate is 1/600us and we sample at 8.335kHz then we get 5 samples per bit period so the counter overflows every 5 samples
+    It's important that it's a signed int because we want the mid-point of the counting to be 0. E.g. -10, -5, 0, 5, 10 
+    The goal is to lock the half-way point of the counter (0) to the edge of the data so that after another half it will overflow.
+    Since it was half at the edge, then another half should be right in the center of the bit period since we chose the counter to specifically half a step size of fs/bit_rate
+    To nudge it, if there is an edge we multiply the counter by alpha which is a float 0 < x < 1. Large = slow locking, better jitter. Small = fast, high jitter.
+    If we are not locked and we encounter an edge, we bump the counter to the left to get it closer to the edge.
+    If we are locked, then the counter should be 0 at the edge, so multiplying it by alpha does nothing and it should stay locked.
+  */
   int cntr = 0;
   int prevCntr = 0;
   bool edge = false;

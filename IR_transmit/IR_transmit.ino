@@ -6,6 +6,7 @@
 #define IR_LED_TX_PIN 3
 #define tPwlMicros 550
 #define tPwhMicros 650
+// It should be 600/600 but for some reason my receiver module decodes it as 620/540. Skew low/high to try and make it closer to 50%
 // use built-in LED for cal active for now
 
 #define TOP F_CPU / (8 * 38000)
@@ -13,10 +14,10 @@
 
 /*
 Packet Structure:
-|------START FLAG-------|-CALIBRATE?-|-CHANNEL (MOTOR)-|--CAL UP/DN--|-----END FLAG-----|
-| (01010101)x?+11111111 |     X      |      XXXX       |     XXXX    | 1111100000111111 |
+|----START FLAG-----|-CALIBRATE?-|--CAL UP/DN--|-CHANNEL (MOTOR)-|-----END FLAG-----|
+| (01010101)x?+1111 |     X      |    XXXX     |       XXXX      | 0011111111111111 |
 calibrate = 1 if calibrating, 0 if actuating
-cal up/dn = 0/3 if neither, 1 if dn, 2 if up
+cal up/dn = 0/1 if neither, 2 if dn, 3 if up
 channel = 0-9, specifies which motor to use. Numbers >9 reserved
 
 If cal button is pressed, don't do anything except light an LED

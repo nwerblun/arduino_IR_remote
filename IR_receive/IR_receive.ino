@@ -8,10 +8,11 @@
 
 #define TOP F_CPU / (2 * 256 * 50)
 
-#define BUFFER_SIZE 1200
-#define FILL_BUFF_SAMP_PERIOD_US 150
-#define START_FLAG_TIMEOUT_CYCLES 500
-#define END_FLAG_TIMEOUT_CYCLES 500
+#define BUFFER_SIZE 960
+#define SAMPLE_BUFFER_SIZE int(1.5 * BUFFER_SIZE / (8335 / 1667))
+
+#define PLL_STEP_SIZE 65536 / int(8335 / 1667)  // 2^16 / (fs / bit rate) where bit rate is 1/600us assuming bit period is 600us
+#define FILL_BUFF_SAMP_PERIOD_US 120  // 8.335kHz sample rate
 // use built-in LED for cal
 
 /*
@@ -102,23 +103,23 @@ void parsePacket(Packet p) {
     digitalWrite(LED_BUILTIN, LOW);
   }
 
-  if (p.calibrating && p.updn == 1 && p.channel == 0) {
+  if (p.calibrating && p.updn == 2 && p.channel == 0) {
     Serial.println("Cal channel 0 down");
     int temp = OCR1A - stepSize;
     OCR1A = (temp < 0) ? 0 : temp;
     // EEPROM is byte addressed. Correct address per channel should be channel * sizeof(uint16_t) since OCR1A is 16 bits
     // EEPROM.put(0, OCR1A);
-  } else if (p.calibrating && p.updn == 2 && p.channel == 0) {
+  } else if (p.calibrating && p.updn == 3 && p.channel == 0) {
     Serial.println("Cal channel 0 up");
     int temp = OCR1A + stepSize;
     OCR1A = (temp >= TOP) ? TOP : temp;
     // EEPROM.put(0, OCR1A);
-  } else if (p.calibrating && p.updn == 1 && p.channel == 1) {
+  } else if (p.calibrating && p.updn == 2 && p.channel == 1) {
     Serial.println("Cal channel 1 down");
     int temp = OCR1B - stepSize;
     OCR1B = (temp < 0) ? 0 : temp;
     // EEPROM.put(sizeof(uint16_t), OCR1B);
-  } else if (p.calibrating && p.updn == 2 && p.channel == 1) {
+  } else if (p.calibrating && p.updn == 3 && p.channel == 1) {
     Serial.println("Cal channel 1 up");
     int temp = OCR1B + stepSize;
     OCR1B = (temp >= TOP) ? TOP : temp;
@@ -140,396 +141,182 @@ void parsePacket(Packet p) {
   }
 }
 
-void fillBuffer(CircularBuffer<bool, BUFFER_SIZE>* x) {
-  int samp;
-  for (int i = 0; i < BUFFER_SIZE; i++) {
-    samp = !digitalRead(IR_REC_RD_PIN);
-    x->push(bool(samp));
+void fillBuffer(byte* x, int len) {
+  int sample;
+  int cnt = 0;
+  while (cnt < len) {
+    sample = !digitalRead(IR_REC_RD_PIN);
+    *(x+cnt) = byte(sample);
     delayMicroseconds(FILL_BUFF_SAMP_PERIOD_US);
+    cnt++;
   }
 }
 
-int getOneLength(CircularBuffer<bool, BUFFER_SIZE>* x) {
-  int startInd = 0;
-  int endInd = 0;
-  bool waitingForNegEdge = false;
-  bool waitingForPosEdge = true;
-  bool prevSample = true;
-  bool currSample;
-  for (int i = 0; i < 100; i++) {
-    currSample = x->first();
-    // 0 -> 1
-    if (!prevSample && currSample && waitingForPosEdge) {
-      startInd = i;
-      waitingForNegEdge = true;
-      waitingForPosEdge = false;
-    // 1 -> 0
-    } else if (prevSample && !currSample && waitingForNegEdge) {
-      endInd = i;
-      return endInd - startInd;
-    }
-    x->shift();
-    prevSample = currSample;
+void printBuffer(byte* x) {
+  Serial.println("Buffer Contents: ");
+  for (int i = 0; i < BUFFER_SIZE; i++) {
+    Serial.print(*(x+i));
   }
-  return -1;
+  Serial.println();
 }
 
-int getZeroLength(CircularBuffer<bool, BUFFER_SIZE>* x) {
-  int startInd = 0;
-  int endInd = 0;
-  bool waitingForNegEdge = true;
-  bool waitingForPosEdge = false;
-  bool prevSample = false;
-  bool currSample;
-  for (int i = 0; i < 100; i++) {
-    currSample = x->first();
-    // 1 -> 0
-    if (prevSample && !currSample && waitingForNegEdge) {
-      startInd = i;
-      waitingForNegEdge = false;
-      waitingForPosEdge = true;
-    // 0 -> 1
-    } else if (!prevSample && currSample && waitingForPosEdge) {
-      endInd = i;
-      return endInd - startInd;
-    }
-    
-    x->shift();
-    prevSample = currSample;
-  }
-  return -1;
-}
-
-bool popOneVal(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ, bool consumeMax) {
-  // Guaranteed that max-min is 1
-  bool first = x->first();
-  bool found = false;
-  int relevantMin = (first) ? minO : minZ;
-  int maxInd = x->size();
-  int counter = 0;
-  if (maxInd < relevantMin) {
-    // Serial.println("There's fewer than the min samples left. Clearing. This is probably an error.");
-    x->clear();
-    return first;
-  }
-
-  while (!found && (counter < maxInd)) {
-    if ((*x)[counter] != first) {
-      found = true;
-    }
-    counter++;
-  }
-
-  counter--; // Final is where the next bit starts, so the current ends 1 before.
-  // Clean X -> Y
-  if (found && counter == relevantMin) {
-    for (int i = 0; i < relevantMin; i++) {
-      x->shift();
-    }
-    return first;
-  } else if (found && (counter == relevantMin + 1)) {
-    for (int i = 0; i < relevantMin + 1; i++) {
-      x->shift();
-    }
-    return first;
-  } 
-  
-  if (found && (counter > (relevantMin + 1))) {
-    int amt = (consumeMax) ? relevantMin + 1 : relevantMin;
-    for (int i = 0; i < amt; i++) {
-      // Serial.print(x->first());
-      x->shift();
-      counter--;
-    }
-  }
-  
-  if (found && (counter < relevantMin)) {
-    for (int i = 0; i < counter; i++) {
-      x->shift();
-    }
-    return first;
-  } else if (found) {
-    return first;
-  }
-
-  // There's nothing left after this one. 
-  if (!found && (maxInd <= (relevantMin + 1))) {
-    x->clear();
-    return first;
-  }
-  
-  // There's at least 1 more value but everything until the end is all the same value, take the min. I think it'll work out since max-min = 1
-  if (!found && (maxInd > (relevantMin + 1))) {
-    int amt = (consumeMax) ? relevantMin + 1 : relevantMin;
-    for (int i = 0; i < amt; i++) {
-      x->shift();
-    }
-    return first;
-  }
-}
-
-bool flagSearch(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ) {
-  Serial.println("Searching for start flag");
-  int onesCount = 0;
-  int count = 0;
-  bool currSample;
-  while (!(x->isEmpty()) && count < START_FLAG_TIMEOUT_CYCLES) {
-    if (onesCount == 4) {
-      // Serial.println("Found it!");
-      return true;
-    }
-
-    currSample = popOneVal(x, minO, minZ, true);
-    if (currSample) {
-      onesCount++;
-    } else {
-      onesCount = 0;
-    }
-    count++;
-  }
-  // Serial.println("Not found");
-  return false;
-}
-
-bool endFlagSearch(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ) {
-  byte onesCount = 0;
-  byte zerosCount = 0;
-  byte count = 0;
-  bool currSample;
-  bool fourOnes = false;
-  bool nineOnes = false;
-  bool threeZeros = false;
-  // printBufferContents(x);
-  while (!(x->isEmpty()) && count < END_FLAG_TIMEOUT_CYCLES) {
-    if (onesCount == 4 && !fourOnes && !nineOnes && !threeZeros) {
-      Serial.println("Found 4 1s");
-      fourOnes = true;
-      onesCount = 0;
-      zerosCount = 0;
-      // printBufferContents(x);
-    } else if (zerosCount == 3 && fourOnes && !nineOnes && !threeZeros) {
-      Serial.println("Found 4 0s");
-      threeZeros = true;
-      onesCount = 0;
-      zerosCount = 0;
-      // printBufferContents(x);
-    } else if (onesCount == 9 && fourOnes && threeZeros && !nineOnes) {
-      Serial.println("Found 9 1s");
-      nineOnes = true;
-      onesCount = 0;
-      zerosCount = 0;
-    }
-
-    if (fourOnes && threeZeros && nineOnes) {
-      return true;
-    }
-
-    currSample = popOneVal(x, minO, minZ, !(fourOnes && threeZeros));
-    if (currSample) {
-      zerosCount = 0;
-      onesCount++;
-    } else {
-      onesCount = 0;
-      zerosCount++;
-    }
-    count++;
-  }
-  return false;
-}
-
-Packet constructPacket(CircularBuffer<bool, BUFFER_SIZE>* x, byte minO, byte minZ) {
-  bool cal;
-  bool samp;
-  // These print statements make it more stable??
-  // printBufferContents(x);
-  // cal is most often 0, consume max
-  samp = popOneVal(x, minO, minZ, true);
-  cal = samp;
-  // If samp == 1, then the break will be a 0.
-  samp = popOneVal(x, minO, minZ, samp);
-
-  if (samp == cal) {
-    Serial.println("Break after cal. bit not found");
-    Packet res;
-    res.calibrating = 0;
-    res.channel = 10;
-    res.updn = 0;
-    return res;
-  }
-  
-  byte ch;
-  for (int i = 0; i < 8; i++) {
-    if (i > 0 && i % 2 == 0) {
-      samp = popOneVal(x, minO, minZ, false);
-      if (bool(bitRead(ch, i-1)) == samp) {
-        Serial.println("Break in ch bits not found");
-        Packet res;
-        res.calibrating = 0;
-        res.channel = 10;
-        res.updn = 0;
-        return res;
-      }
-    }
-    samp = popOneVal(x, minO, minZ, false);
-    bitWrite(ch, i, int(samp));
-  }
-
-  byte updn;
-  for (int i = 0; i < 8; i++) {
-    if (i > 0 && i % 2 == 0) {
-      samp = popOneVal(x, minO, minZ, false);
-      if (bool(bitRead(updn, i-1)) == samp) {
-        Serial.println("Break in updn bits not found");
-        Packet res;
-        res.calibrating = 0;
-        res.channel = 10;
-        res.updn = 0;
-        return res;
-      }
-    }
-    samp = popOneVal(x, minO, minZ, false);
-    bitWrite(updn, i, int(samp));
-  }
-
-  Packet res;
-  res.calibrating = cal;
-  res.channel = ch;
-  res.updn = updn;
-  return res;
-}
-
-void printBufferContents(CircularBuffer<bool, BUFFER_SIZE>* x) {
+void printSampleBuffer(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* x) {
+  Serial.print("Sample Buffer Contents with size ");
+  Serial.print(x->size());
+  Serial.println(":");
   for (int i = 0; i < x->size(); i++) {
     Serial.print((*x)[i]);
+    Serial.print(" ");
   }
-    Serial.println();
+  Serial.println();
 }
 
-CircularBuffer<bool, BUFFER_SIZE> sampleBuffer;
+bool consumeStartFlag(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
+  int size = s->size();
+  byte onesCount = 0;
+  for (int i = 0; i < size; i++) {
+    if (onesCount == 4) {
+      return true;
+    }
+    if (s->first() == 1) {
+      onesCount++;
+    } else {
+      onesCount = 0;
+    }
+    s->shift();
+  }
+  return false;
+}
+
+bool consumeEndFlag(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
+  int size = s->size();
+  byte onesCount = 0;
+  byte zerosCount = 0;
+  bool lookingForOnes = false;
+  for (int i = 0; i < size; i++) {
+    if (zerosCount == 2 && !lookingForOnes) {
+      lookingForOnes = true;
+    } else if (onesCount == 14 && lookingForOnes) {
+      return true;
+    }
+
+    if (s->first() == 1) {
+      onesCount++;
+      zerosCount = 0;
+    } else {
+      zerosCount++;
+      onesCount = 0;
+    }
+    s->shift();
+  }
+  return false;
+}
+
+Packet consumeData(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
+  bool calibrating = bool(s->shift());
+  int samp;
+  int breakBit;
+  byte ch;
+  byte updn;
+  Packet p;
+  for (int i = 0; i < 9; i++) {
+    if (i > 0 && i % 2 == 0) {
+      breakBit = s->shift();
+      if (breakBit == samp) {
+        p.channel = 10;
+        p.calibrating = false;
+        p.updn = 1;
+        return p;
+      }
+    }
+    if (i < 8) {
+      samp = s->shift();
+      bitWrite(updn, i, samp);
+    }
+  }
+
+  for (int i = 0; i < 9; i++) {
+    if (i > 0 && i % 2 == 0) {
+      breakBit = s->shift();
+      if (breakBit == samp) {
+        p.channel = 10;
+        p.calibrating = false;
+        p.updn = 1;
+        return p;
+      }
+    }
+    if (i < 8) {
+      samp = s->shift();
+      bitWrite(ch, i, samp);
+    }
+  }
+  p.channel = ch;
+  p.updn = updn;
+  p.calibrating = calibrating;
+  return p;
+}
+
+void getSamplePoints(byte* x, int len, CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
+  // DireWolf SDR software PLL implementation based on an overflowing counter
+  int cntr = 0;
+  int prevCntr = 0;
+  bool edge = false;
+  float alpha = 0.5;
+  for (int i = 1; i < len; i++) {
+    edge = *(x+i) != *(x+(i-1));
+    alpha = (edge) ? 0.6 : 1;
+    cntr = (prevCntr * alpha) + PLL_STEP_SIZE;
+    if (cntr < 0 && prevCntr >= 0) {
+      // Overflow, take samp
+      s->push(*(x+i));
+    }
+    prevCntr = cntr;
+  }
+}
+
+void printPacket(Packet p) {
+  Serial.print("Cal?: ");
+  Serial.println(p.calibrating);
+  Serial.print("Ch: ");
+  Serial.println(p.channel);
+  Serial.print("updn: ");
+  Serial.println(p.updn);
+}
+
 int samp;
-byte oneLength;
-byte minOneLength = 1000;
-byte maxOneLength = 0;
-byte zeroLength;
-byte minZeroLength = 1000;
-byte maxZeroLength = 0;
-bool flagFound;
-bool foundEnd;
 Packet recPacket;
+byte* sampleBuffer;
+CircularBuffer<byte, SAMPLE_BUFFER_SIZE> sampledPointsBuffer;
 void loop() {
   // Samples are active low
   samp = !digitalRead(IR_REC_RD_PIN);
   if (samp) {
     Serial.println("---------");
-    sampleBuffer.clear();
-    minZeroLength = 1000;
-    maxZeroLength = 0;
-    minOneLength = 1000;
-    maxOneLength = 0;
-    fillBuffer(&sampleBuffer);
-
-    // ----Find min/max length of a 1 sample---
-    for (int i = 0; i < 4; i++) {
-      oneLength = getOneLength(&sampleBuffer);
-
-      if (oneLength <= 0) {
-        Serial.println("Went through everything and didn't find a 1???");
-        return;
-      }
-
-      if (oneLength > maxOneLength) {
-        maxOneLength = oneLength;
-      }
-
-      if (oneLength < minOneLength) {
-        minOneLength = oneLength;
-      }
-    }
-    // Serial.print("Min 1 length in samples: ");
-    // Serial.println(minOneLength);
-    // Serial.print("Max 1 length in samples: ");
-    // Serial.println(maxOneLength);
-
-    // ----Find min/max length of a 0 sample---
-    for (int i = 0; i < 4; i++) {
-      zeroLength = getZeroLength(&sampleBuffer);
-
-      if (zeroLength <= 0) {
-        // Serial.println("Went through everything and didn't find a 0???");
-        return;
-      }
-
-      if (zeroLength > maxZeroLength) {
-        maxZeroLength = zeroLength;
-      }
-
-      if (zeroLength < minZeroLength) {
-        minZeroLength = zeroLength;
-      }
-    }
-    // Serial.print("Min 0 length in samples: ");
-    // Serial.println(minZeroLength);
-    // Serial.print("Max 0 length in samples: ");
-    // Serial.println(maxZeroLength);
-
-    // ------ASSERTIONS-----
-    if ((maxOneLength - minOneLength) > 1) {
-      // Serial.println("Too much variation in 1 length");
+    // ----initialize----
+    sampledPointsBuffer.clear();
+    sampleBuffer = (byte*) calloc(BUFFER_SIZE, sizeof(byte));
+    // -----take samples-----
+    fillBuffer(sampleBuffer, BUFFER_SIZE);
+    // printBuffer(sampleBuffer);
+    // -------Run PLL on sample points and fill sample point buffer----
+    getSamplePoints(sampleBuffer, BUFFER_SIZE, &sampledPointsBuffer);
+    // printSampleBuffer(&sampledPointsBuffer);
+    // ----clear sample buffer mem-------
+    free(sampleBuffer);
+    // ------Check if flag exists and if so, build data
+    if (consumeStartFlag(&sampledPointsBuffer)) {
+      Serial.println("We got a valid start");
+      // printSampleBuffer(&sampledPointsBuffer);
+      recPacket = consumeData(&sampledPointsBuffer);
+      // printSampleBuffer(&sampledPointsBuffer);
+    } else {
       return;
     }
-
-    if ((maxZeroLength - minZeroLength) > 1) {
-      // Serial.println("Too much variation in 0 length");
-      return;
-    }
-
-    
-    if (minOneLength == 1) {
-      // Serial.println("1 length is 1 sample. Too small to disambiguate");
-      return;
-    }
-
-    if (minZeroLength == 1) {
-      // Serial.println("0 length is 1 sample. Too small to disambiguate");
-      return;
-    }
-
-    
-    // if (DEBUG_PRINT) {
-    //   Serial.println("Buffer contents post 'locking': ");
-    // //   printBufferContents(&sampleBuffer);
-    // }
-
-    // -----Search remaining buffer vals for the flag----
-    flagFound = flagSearch(&sampleBuffer, minOneLength, minZeroLength);
-    if (!flagFound) {
-      return;
-    }
-
-    // if (DEBUG_PRINT) {
-    //   Serial.println("Buffer contents post start flag: ");
-    // //   printBufferContents(&sampleBuffer);
-    // }
-
-    // ------- Build packet----------
-    recPacket = constructPacket(&sampleBuffer, minOneLength, minZeroLength);
-    Serial.println("Packet contents: ");
-    Serial.print("Cal?: ");
-    Serial.println(recPacket.calibrating);
-    Serial.print("Channel: ");
-    Serial.println(recPacket.channel);
-    Serial.print("UpDn: ");
-    Serial.println(recPacket.updn);
-    Serial.print("Remaining vals: ");
-    Serial.println(sampleBuffer.size());
-    // ------Find end flag---------
-    foundEnd = endFlagSearch(&sampleBuffer, minOneLength, minZeroLength);
-    if (foundEnd) {
-      Serial.println("Found the end flag");
+    // -----Check if end flag exists and do something------
+    if (consumeEndFlag(&sampledPointsBuffer)) {
+      Serial.println("End found!");
+      // printPacket(recPacket);
       parsePacket(recPacket);
     }
-
-    // Avoid scanning the same packet again
-    delay(200);
   }
 }

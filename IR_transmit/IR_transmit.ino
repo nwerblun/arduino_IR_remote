@@ -4,8 +4,8 @@
 #define CAL_DN_PIN 10
 #define CALIBRATE_TOGGLE_PIN 8
 #define IR_LED_TX_PIN 3
-#define tPwlMicros 895
-#define tPwhMicros 595
+#define tPwlMicros 550
+#define tPwhMicros 650
 // use built-in LED for cal active for now
 
 #define TOP F_CPU / (8 * 38000)
@@ -30,10 +30,10 @@ If cal is not selected and channel is pressed send cal=0, channel=channel, cal_u
 struct Packet {
   int start_flag_locking = 0b0101010101010101;
   int start_flag_remainder = 0b1111010101010101;
-  int end_flag = 0b1111111110001111;
+  int end_flag = 0b1111111111111100;
   bool calibrating = false;
-  byte channel = 0b1010;
-  byte up_dn = 0b0000;
+  byte channel = 0b00001010;
+  byte updn = 0b00000001;
 };
 
 void setup() {
@@ -84,6 +84,7 @@ void sendZero() {
 void sendByteRaw(byte sendVal) {
   int data;
   for (int i = 0; i < 8; i++) {
+    data = bitRead(sendVal, i);
     if (i > 0 && i % 2 == 0) {
       if (bitRead(sendVal, i-1)) {
         sendZero();
@@ -91,12 +92,17 @@ void sendByteRaw(byte sendVal) {
         sendOne();
       }
     }
-    data = bitRead(sendVal, i);
     if (data == 1) {
       sendOne();
     } else {
       sendZero();
     }
+  }
+  
+  if (bitRead(sendVal, 7) == 1) {
+    sendZero();
+  } else {
+    sendOne();
   }
 }
 
@@ -124,25 +130,16 @@ void sendPacket(Packet toBeSent) {
     sendIntRaw(toBeSent.start_flag_locking);
   }
   sendIntRaw(toBeSent.start_flag_remainder);
-  
-  // Serial.print("_");
 
+  
   if (toBeSent.calibrating) {
     sendOne();
-    sendZero();
   } else{
     sendZero();
-    sendOne();
   }
-  // Serial.print("_");
 
+  sendByteRaw(toBeSent.updn);
   sendByteRaw(toBeSent.channel);
-  
-  // Serial.print("_");
-
-  sendByteRaw(toBeSent.up_dn);
-
-  // Serial.print("_");
 
   sendIntRaw(toBeSent.end_flag);
 
@@ -198,21 +195,18 @@ void loop() {
       toSend.calibrating = true;
       digitalWrite(LED_BUILTIN, HIGH);
       sendPacket(toSend);
-      return;
     } else {
       Serial.println("Calibration deactivated");
 
       calibrating = false;
       digitalWrite(LED_BUILTIN, LOW);
       sendPacket(getDefaultPacket());
-      return;
     }
   }
   // --------READ CHANNEL 0 BUTTON--------
   else if (!(test_chann_button_rd == HIGH)) {
     Serial.println("Channel 0 pressed");
     anythingPressed = true;
-    unsigned long timeStart = millis();
     toSend = getDefaultPacket();
     toSend.channel = 0b0000;
     toSend.calibrating = calibrating;
@@ -221,10 +215,6 @@ void loop() {
       //Serial.println("Calibration channel is now 0");
     }
     sendPacket(toSend);
-    Serial.print("Took ");
-    Serial.print(millis() - timeStart);
-    Serial.println("ms to send");
-    return;
   }
   // --------READ UP BUTTON--------
   else if (!(cal_up_rd == HIGH)) {
@@ -233,9 +223,8 @@ void loop() {
     toSend = getDefaultPacket();
     toSend.channel = cal_channel;
     toSend.calibrating = calibrating;
-    toSend.up_dn = 0b0010;
+    toSend.updn = 0b0011;
     sendPacket(toSend);
-    return;
   }
   // --------READ DN BUTTON--------
   else if (!(cal_dn_rd == HIGH)) {
@@ -244,11 +233,10 @@ void loop() {
     toSend = getDefaultPacket();
     toSend.channel = cal_channel;
     toSend.calibrating = calibrating;
-    toSend.up_dn = 0b0001;
+    toSend.updn = 0b0010;
     sendPacket(toSend);
-    return;
   }
 
   // Small delay to avoid resending
-  delay(50);
+  delay(100);
 }

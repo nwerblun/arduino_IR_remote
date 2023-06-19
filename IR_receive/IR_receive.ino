@@ -4,9 +4,11 @@
 #define CHANNEL_0_PIN 9
 #define CHANNEL_1_PIN 10
 #define IR_REC_RD_PIN 19
+#define PWR_ON_LED_PIN 0
+#define CAL_LED_PIN 1
 #define NUM_CHANNELS 2
 
-#define TOP F_CPU / (2 * 256 * 50)
+#define TOP F_CPU / (2 * 64 * 50)
 
 #define BUFFER_SIZE 960
 #define SAMPLE_BUFFER_SIZE int(1.5 * BUFFER_SIZE / (8335 / 1667))  // Somewhat arbitrary. I figured I would be taking BUFFER_SIZE / (fs / baud) samples, so 1.5x it for margin
@@ -62,14 +64,15 @@ void setup() {
   set OCR1A = desired duty cycle as a % of ICR1. E.g. for 1000Hz, OCR1A = 450 gives 45% DC
   set OCR1B = desired dc for channel B
   */
-  Serial.begin(9600);
+  // Serial.begin(9600);
   pinMode(CHANNEL_0_PIN, OUTPUT);
   pinMode(CHANNEL_1_PIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(CAL_LED_PIN, OUTPUT);
+  pinMode(PWR_ON_LED_PIN, OUTPUT);
   pinMode(IR_REC_RD_PIN, INPUT);
 
   // Zero out default settings, keep only reserved/required bits
-  TCCR1B &= 0b11111000;
+  TCCR1B &= 0b11100000;
   TCCR1A &= 0b10100000;
 
   // Set prescalar to 64 (CS12/11/10 = 0, 1, 1)
@@ -84,57 +87,65 @@ void setup() {
   TCCR1A |= (1 << COM1A1);
   TCCR1A |= (1 << COM1B1);
   // Set duty cycle. Default to 1.5% for both channels (20ms period, 1.5ms pulse)
-  OCR1A = int(0.075 * TOP);
-  OCR1B = int(0.075 * TOP);
+  // OCR1A = int(0.075 * TOP);
+  // OCR1B = int(0.075 * TOP);
 
-  // uint16_t ch0StoredDC;
-  // uint16_t ch1StoredDC;
-  // OCR1A = EEPROM.get(0, ch0StoredDC);
-  // OCR1B = EEPROM.get(sizeof(uint16_t), ch1StoredDC);
+  uint16_t ch0StoredDC;
+  uint16_t ch1StoredDC;
+  ch0StoredDC = (EEPROM[0] << 8) + EEPROM[1];
+  ch1StoredDC = (EEPROM[2] << 8) + EEPROM[3];
+  OCR1A = ch0StoredDC;
+  OCR1B = ch1StoredDC;
+  digitalWrite(CAL_LED_PIN, LOW);
+  digitalWrite(PWR_ON_LED_PIN, HIGH);
 }
 
-int stepSize = TOP * 0.0005;
+int stepSize = TOP * 0.001;
 void parsePacket(Packet p) {
   if ((p.channel < 0) || (p.channel > 10)) {
     return;
   }
   
   if (p.calibrating) {
-    digitalWrite(LED_BUILTIN, HIGH);
+    digitalWrite(CAL_LED_PIN, HIGH);
   } else {
-    digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(CAL_LED_PIN, LOW);
   }
 
   if (p.calibrating && p.updn == 2 && p.channel == 0) {
-    Serial.println("Cal channel 0 down");
+    // Serial.println("Cal channel 0 down");
     int temp = OCR1A - stepSize;
     OCR1A = (temp < 0) ? 0 : temp;
     // EEPROM is byte addressed. Correct address per channel should be channel * sizeof(uint16_t) since OCR1A is 16 bits
-    // EEPROM.put(0, OCR1A);
+    EEPROM.update(0, OCR1A >> 8);
+    EEPROM.update(1, OCR1A);
   } else if (p.calibrating && p.updn == 3 && p.channel == 0) {
-    Serial.println("Cal channel 0 up");
+    // Serial.println("Cal channel 0 up");
     int temp = OCR1A + stepSize;
     OCR1A = (temp >= TOP) ? TOP : temp;
-    // EEPROM.put(0, OCR1A);
+    EEPROM.update(0, OCR1A >> 8);
+    EEPROM.update(1, OCR1A);
   } else if (p.calibrating && p.updn == 2 && p.channel == 1) {
-    Serial.println("Cal channel 1 down");
+    // Serial.println("Cal channel 1 down");
     int temp = OCR1B - stepSize;
     OCR1B = (temp < 0) ? 0 : temp;
-    // EEPROM.put(sizeof(uint16_t), OCR1B);
+    EEPROM.update(2, OCR1B >> 8);
+    EEPROM.update(3, OCR1B);
   } else if (p.calibrating && p.updn == 3 && p.channel == 1) {
-    Serial.println("Cal channel 1 up");
+    // Serial.println("Cal channel 1 up");
     int temp = OCR1B + stepSize;
     OCR1B = (temp >= TOP) ? TOP : temp;
-    // EEPROM.put(sizeof(uint16_t), OCR1B);
+    EEPROM.update(2, OCR1B >> 8);
+    EEPROM.update(3, OCR1B);
   } else if (p.channel == 0 && !p.calibrating) {
-    Serial.println("Actuating channel 0");
+    // Serial.println("Actuating channel 0");
     int prev = OCR1A;
     int temp = prev + (50 * stepSize);
     OCR1A = (temp >= TOP) ? TOP : temp;
     delay(1500);
     OCR1A = prev;
   } else if (p.channel == 1 && !p.calibrating) {
-    Serial.println("Actuating channel 1");
+    // Serial.println("Actuating channel 1");
     int prev = OCR1B;
     int temp = prev + (50 * stepSize);
     OCR1B = (temp >= TOP) ? TOP : temp;
@@ -155,22 +166,22 @@ void fillBuffer(byte* x, int len) {
 }
 
 void printBuffer(byte* x) {
-  Serial.println("Buffer Contents: ");
+  // Serial.println("Buffer Contents: ");
   for (int i = 0; i < BUFFER_SIZE; i++) {
-    Serial.print(*(x+i));
+    // Serial.print(*(x+i));
   }
-  Serial.println();
+  // Serial.println();
 }
 
 void printSampleBuffer(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* x) {
-  Serial.print("Sample Buffer Contents with size ");
-  Serial.print(x->size());
-  Serial.println(":");
+  // Serial.print("Sample Buffer Contents with size ");
+  // Serial.print(x->size());
+  // Serial.println(":");
   for (int i = 0; i < x->size(); i++) {
-    Serial.print((*x)[i]);
-    Serial.print(" ");
+    // Serial.print((*x)[i]);
+    // Serial.print(" ");
   }
-  Serial.println();
+  // Serial.println();
 }
 
 bool consumeStartFlag(CircularBuffer<byte, SAMPLE_BUFFER_SIZE>* s) {
@@ -289,12 +300,12 @@ void getSamplePoints(byte* x, int len, CircularBuffer<byte, SAMPLE_BUFFER_SIZE>*
 }
 
 void printPacket(Packet p) {
-  Serial.print("Cal?: ");
-  Serial.println(p.calibrating);
-  Serial.print("Ch: ");
-  Serial.println(p.channel);
-  Serial.print("updn: ");
-  Serial.println(p.updn);
+  // Serial.print("Cal?: ");
+  // Serial.println(p.calibrating);
+  // Serial.print("Ch: ");
+  // Serial.println(p.channel);
+  // Serial.print("updn: ");
+  // Serial.println(p.updn);
 }
 
 int samp;
@@ -305,7 +316,7 @@ void loop() {
   // Samples are active low
   samp = !digitalRead(IR_REC_RD_PIN);
   if (samp) {
-    Serial.println("---------");
+    // Serial.println("---------");
     // ----initialize----
     sampledPointsBuffer.clear();
     sampleBuffer = (byte*) calloc(BUFFER_SIZE, sizeof(byte));
@@ -319,7 +330,7 @@ void loop() {
     free(sampleBuffer);
     // ------Check if flag exists and if so, build data
     if (consumeStartFlag(&sampledPointsBuffer)) {
-      Serial.println("We got a valid start");
+      // Serial.println("We got a valid start");
       // printSampleBuffer(&sampledPointsBuffer);
       recPacket = consumeData(&sampledPointsBuffer);
       // printSampleBuffer(&sampledPointsBuffer);
@@ -328,7 +339,7 @@ void loop() {
     }
     // -----Check if end flag exists and do something------
     if (consumeEndFlag(&sampledPointsBuffer)) {
-      Serial.println("End found!");
+      // Serial.println("End found!");
       // printPacket(recPacket);
       parsePacket(recPacket);
     }

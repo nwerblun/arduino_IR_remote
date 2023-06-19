@@ -1,13 +1,17 @@
 // #include <EEPROM.h>
-#define TEST_SEND_BUTTON_PIN 2
-#define CAL_UP_PIN 9
+#define CHANNEL_0_ACTIVATE_PIN 11
+#define CHANNEL_1_ACTIVATE_PIN 2
+#define CAL_UP_PIN 8
 #define CAL_DN_PIN 10
-#define CALIBRATE_TOGGLE_PIN 8
+#define CALIBRATE_TOGGLE_PIN 9
+
 #define IR_LED_TX_PIN 3
-#define tPwlMicros 550
-#define tPwhMicros 650
+#define CAL_LED_PIN 1
+#define PWR_ON_LED_PIN 0
+
+#define tPwlMicros 600
+#define tPwhMicros 600
 // It should be 600/600 but for some reason my receiver module decodes it as 620/540. Skew low/high to try and make it closer to 50%
-// use built-in LED for cal active for now
 
 #define TOP F_CPU / (8 * 38000)
 #define HALF_DUTY_COUNT int(TOP / 2);
@@ -39,14 +43,17 @@ struct Packet {
 
 void setup() {
   pinMode(IR_LED_TX_PIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(CAL_LED_PIN, OUTPUT);
+  pinMode(PWR_ON_LED_PIN, OUTPUT);
 
-  pinMode(TEST_SEND_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(CHANNEL_0_ACTIVATE_PIN, INPUT_PULLUP);
+  pinMode(CHANNEL_1_ACTIVATE_PIN, INPUT_PULLUP);
   pinMode(CAL_UP_PIN, INPUT_PULLUP);
   pinMode(CAL_DN_PIN, INPUT_PULLUP);
   pinMode(CALIBRATE_TOGGLE_PIN, INPUT_PULLUP);
 
-  Serial.begin(9600);
+  // Cannot have serial if using pins 0/1
+  // Serial.begin(9600);
 
   // Set pin 3 to 38kHz PWM 50% duty cycle
   // Timer 2 = pins 11/3
@@ -67,6 +74,9 @@ void setup() {
   TCCR2A |= (1 << COM2B1);
   // Set duty cycle
   OCR2B = 0;
+
+  digitalWrite(CAL_LED_PIN, LOW);
+  digitalWrite(PWR_ON_LED_PIN, HIGH);
 }
 
 void sendOne() {
@@ -126,7 +136,7 @@ Packet getDefaultPacket() {
 }
 
 void sendPacket(Packet toBeSent) {
-  Serial.println("Sending packet");
+  // Serial.println("Sending packet");
   for (int i = 0; i < 4; i++) {
     sendIntRaw(toBeSent.start_flag_locking);
   }
@@ -144,7 +154,7 @@ void sendPacket(Packet toBeSent) {
 
   sendIntRaw(toBeSent.end_flag);
 
-  Serial.println("\nPacket sent");
+  // Serial.println("\nPacket sent");
 }
 
 bool calibrating = false;
@@ -153,24 +163,27 @@ byte cal_channel = 10;
 int cal_toggle_rd;
 int cal_up_rd;
 int cal_dn_rd;
-int test_chann_button_rd;
+int ch0_rd;
+int ch1_rd;
 Packet toSend;
 bool anythingPressed = false;
-bool debug = false;
+// bool debug = false;
 void loop() {
   cal_toggle_rd = digitalRead(CALIBRATE_TOGGLE_PIN);
-  test_chann_button_rd = digitalRead(TEST_SEND_BUTTON_PIN);
+  ch0_rd = digitalRead(CHANNEL_0_ACTIVATE_PIN);
+  ch1_rd = digitalRead(CHANNEL_1_ACTIVATE_PIN);
   cal_up_rd = digitalRead(CAL_UP_PIN);
   cal_dn_rd = digitalRead(CAL_DN_PIN);
   // Remember there's pullups, so LOW = active
 
+/*
   if (debug) {
     String cmd = "";
     if (Serial.available() > 0) {
       cmd = Serial.readString();
       cmd.trim();
       if (cmd == "send_chan_0") {
-        test_chann_button_rd = HIGH;
+        ch0_rd = HIGH;
       } else if (cmd == "send_up") {
         cal_up_rd = HIGH;
       } else if (cmd == "send_dn") {
@@ -180,46 +193,60 @@ void loop() {
       }
     }
   }
-  
+*/
+
   // --------READ CALIBRATE BUTTON--------
   if (!(cal_toggle_rd == HIGH)) {
-    Serial.println("Cal pressed");
+    // Serial.println("Cal pressed");
     anythingPressed = true;
     cal_channel = 0b1010;
     if (!calibrating) {
-      Serial.print("Calibration activated, cal channel is ");
-      Serial.print(cal_channel, DEC);
-      Serial.println();
+      // Serial.print("Calibration activated, cal channel is ");
+      // Serial.print(cal_channel, DEC);
+      // Serial.println();
 
       calibrating = true;
       toSend = getDefaultPacket();
       toSend.calibrating = true;
-      digitalWrite(LED_BUILTIN, HIGH);
+      digitalWrite(CAL_LED_PIN, HIGH);
       sendPacket(toSend);
     } else {
-      Serial.println("Calibration deactivated");
+      // Serial.println("Calibration deactivated");
 
       calibrating = false;
-      digitalWrite(LED_BUILTIN, LOW);
+      digitalWrite(CAL_LED_PIN, LOW);
       sendPacket(getDefaultPacket());
     }
   }
   // --------READ CHANNEL 0 BUTTON--------
-  else if (!(test_chann_button_rd == HIGH)) {
-    Serial.println("Channel 0 pressed");
+  else if (!(ch0_rd == HIGH)) {
+    // Serial.println("Channel 0 pressed");
     anythingPressed = true;
     toSend = getDefaultPacket();
     toSend.channel = 0b0000;
     toSend.calibrating = calibrating;
     if (calibrating) {
       cal_channel = 0b0000;
-      //Serial.println("Calibration channel is now 0");
+      // //Serial.println("Calibration channel is now 0");
+    }
+    sendPacket(toSend);
+  }
+  // --------READ CHANNEL 1 BUTTON--------
+  else if (!(ch1_rd == HIGH)) {
+    // Serial.println("Channel 1 pressed");
+    anythingPressed = true;
+    toSend = getDefaultPacket();
+    toSend.channel = 0b0001;
+    toSend.calibrating = calibrating;
+    if (calibrating) {
+      cal_channel = 0b0001;
+      // //Serial.println("Calibration channel is now 0");
     }
     sendPacket(toSend);
   }
   // --------READ UP BUTTON--------
   else if (!(cal_up_rd == HIGH)) {
-    Serial.println("Up button pressed");
+    // Serial.println("Up button pressed");
     anythingPressed = true;
     toSend = getDefaultPacket();
     toSend.channel = cal_channel;
@@ -229,7 +256,7 @@ void loop() {
   }
   // --------READ DN BUTTON--------
   else if (!(cal_dn_rd == HIGH)) {
-    Serial.println("Down button pressed");
+    // Serial.println("Down button pressed");
     anythingPressed = true;
     toSend = getDefaultPacket();
     toSend.channel = cal_channel;

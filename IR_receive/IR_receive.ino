@@ -8,6 +8,8 @@
 #define CAL_LED_PIN 1
 #define NUM_CHANNELS 2
 
+#define NUM_STEPS_PER_ACTUATE 40
+
 #define TOP F_CPU / (2 * 64 * 50)
 
 #define BUFFER_SIZE 960
@@ -71,6 +73,8 @@ void setup() {
   pinMode(PWR_ON_LED_PIN, OUTPUT);
   pinMode(IR_REC_RD_PIN, INPUT);
 
+  digitalWrite(CAL_LED_PIN, LOW);
+
   // Zero out default settings, keep only reserved/required bits
   TCCR1B &= 0b11100000;
   TCCR1A &= 0b10100000;
@@ -96,7 +100,6 @@ void setup() {
   ch1StoredDC = (EEPROM[2] << 8) + EEPROM[3];
   OCR1A = ch0StoredDC;
   OCR1B = ch1StoredDC;
-  digitalWrite(CAL_LED_PIN, LOW);
   digitalWrite(PWR_ON_LED_PIN, HIGH);
 }
 
@@ -115,40 +118,40 @@ void parsePacket(Packet p) {
   if (p.calibrating && p.updn == 2 && p.channel == 0) {
     // Serial.println("Cal channel 0 down");
     int temp = OCR1A - stepSize;
-    OCR1A = (temp < 0) ? 0 : temp;
+    OCR1A = (temp < 0) ? 5 : temp; // Avoid the limits, go 1 above/below
     // EEPROM is byte addressed. Correct address per channel should be channel * sizeof(uint16_t) since OCR1A is 16 bits
     EEPROM.update(0, OCR1A >> 8);
     EEPROM.update(1, OCR1A);
   } else if (p.calibrating && p.updn == 3 && p.channel == 0) {
     // Serial.println("Cal channel 0 up");
     int temp = OCR1A + stepSize;
-    OCR1A = (temp >= TOP) ? TOP : temp;
+    OCR1A = (temp >= TOP) ? TOP-5 : temp;
     EEPROM.update(0, OCR1A >> 8);
     EEPROM.update(1, OCR1A);
   } else if (p.calibrating && p.updn == 2 && p.channel == 1) {
     // Serial.println("Cal channel 1 down");
     int temp = OCR1B - stepSize;
-    OCR1B = (temp < 0) ? 0 : temp;
+    OCR1B = (temp < 0) ? 5 : temp;
     EEPROM.update(2, OCR1B >> 8);
     EEPROM.update(3, OCR1B);
   } else if (p.calibrating && p.updn == 3 && p.channel == 1) {
     // Serial.println("Cal channel 1 up");
     int temp = OCR1B + stepSize;
-    OCR1B = (temp >= TOP) ? TOP : temp;
+    OCR1B = (temp >= TOP) ? TOP-5 : temp;
     EEPROM.update(2, OCR1B >> 8);
     EEPROM.update(3, OCR1B);
   } else if (p.channel == 0 && !p.calibrating) {
     // Serial.println("Actuating channel 0");
     int prev = OCR1A;
-    int temp = prev + (50 * stepSize);
-    OCR1A = (temp >= TOP) ? TOP : temp;
+    int temp = prev - (NUM_STEPS_PER_ACTUATE * stepSize);
+    OCR1A = (temp < 0) ? 5 : temp;
     delay(1500);
     OCR1A = prev;
   } else if (p.channel == 1 && !p.calibrating) {
-    // Serial.println("Actuating channel 1");
+    // Serial.println("Actuating channel 0");
     int prev = OCR1B;
-    int temp = prev + (50 * stepSize);
-    OCR1B = (temp >= TOP) ? TOP : temp;
+    int temp = prev - (NUM_STEPS_PER_ACTUATE * stepSize);
+    OCR1B = (temp < 0) ? 5 : temp;
     delay(1500);
     OCR1B = prev;
   }
